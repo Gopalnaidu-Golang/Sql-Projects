@@ -1,0 +1,147 @@
+
+1. use varchar/nvarchar instead of char/nchar whenever possible
+2.use numeric fields as much as possible ex empID varchar[20]
+3.replace union with unionall
+4.use distinct keyword with cauation
+5.try not use select * to query sql,but select specific field
+6.if u know that there is only one query result,t is recommended 
+7.optimize your like statement.
+8.u shouls avoid to use the != or <> operator in the where clause as much as possible
+
+------execution plan and optimization dictionary-------
+execution plan and statistics time/io
+
+set statistics io.time on
+phiscical read and memory write
+spooling means copy of data
+
+
+
+
+ex:
+CREATE TABLE `user_timesheets` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `shift_id` int NOT NULL,
+  `added_by` int NOT NULL,
+  `checkin_time` datetime DEFAULT NULL,
+  `checkout_time` datetime DEFAULT NULL,
+  `is_mediation_required` tinyint(1) DEFAULT '0',
+  `mediation_request_date` datetime DEFAULT NULL,
+  `is_mediation_resolved` tinyint(1) DEFAULT '0',
+  `nurse_mediation_message` mediumtext,
+  `mediation_resolve_response` mediumtext,
+  `checkin_lat` decimal(7,3) DEFAULT NULL,
+  `checkin_lng` decimal(7,3) DEFAULT NULL,
+  `checkin_accuracy` int DEFAULT NULL,
+  `checkout_lat` decimal(7,3) DEFAULT NULL,
+  `checkout_lng` decimal(7,3) DEFAULT NULL,
+  `checkout_accuracy` int DEFAULT NULL,
+  `is_approved_by_floor_supervisor` enum('Y','N') DEFAULT NULL,
+  `supervisor_name` mediumtext,
+  `sign_link` mediumtext,
+  `status` varchar(255) DEFAULT NULL,
+  `status_updated_on` datetime DEFAULT NULL,
+  `updated_by` int DEFAULT NULL,
+  `created_on` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_on` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted` tinyint(1) NOT NULL DEFAULT '0',
+  `is_approved_by_floor_supervisor_signin` enum('Y','N') DEFAULT NULL,
+  `hazard_pay_enabled` tinyint(1) DEFAULT '0',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `user_timesheet_unq` (`shift_id`,`added_by`),
+  KEY `user_timesheets_fk2` (`added_by`),
+  KEY `user_timesheets_added_by_checkout_time` (`added_by`,`checkout_time`),
+  CONSTRAINT `user_timesheets_fk1` FOREIGN KEY (`shift_id`) REFERENCES `shifts` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `user_timesheets_fk2` FOREIGN KEY (`added_by`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=36235 DEFAULT CHARSET=latin1
+
+
+SELECT
+			ut.id AS id,
+			ut.is_break_taken,
+			ut.id AS timesheet_id,
+			sa.user_id AS user_id,
+			s.id AS shift_id,
+			usst.name AS statcash,
+			ussl.status_id AS statcash_id,
+			concat(u.first_name," ",u.last_name) AS nurse,
+			concat(sup.first_name," ",sup.last_name) AS supervisor,
+			r.name AS role_name,
+			CONVERT_TZ(ut.checkin_time,'UTC',tz.name ) AS checkin_time,
+			CONVERT_TZ(ut.checkout_time,'UTC',tz.name ) AS checkout_time,
+			ut.status,
+			u.id AS nurse_id,
+			s.shift_date,
+			s.start_time,
+			s.end_time,
+			o.title AS organization_name,
+			o.id AS organization_id,
+			ol.location_name,
+			tz.name AS timezone_name,
+			tz.abbreviation AS timezone_abbr,
+			u.loyalty_level AS loyalty_level,
+			old.dept_name,
+			IF(sbl.deleted = false, sbl.bonus_amount, b.amount) AS bonus_amount,
+			IF(sbl.deleted = false, sbl.bonus_unit, b.unit) AS bonus_unit,
+			ut.hazard_pay_enabled,
+        	IFNULL(
+				(	SELECT
+						feature_status
+					FROM shift_features
+					WHERE shift_id = s.id
+					AND feature_id = :NDP
+					ORDER BY created_on DESC LIMIT 1),false
+			) AS is_ndp_enable,
+        	s.shift_endtime AS shiftend_datetime,
+   			s.shift_starttime AS shiftstart_datetime,
+        	TIME_TO_SEC(
+				TIMEDIFF(
+					IF (uts.to_date IS NULL, date_format(ut.checkout_time,:format), date_format(uts.to_date,:format)),
+					IF (uts.from_date IS NULL, date_format(ut.checkin_time,:format),  date_format(uts.from_date,:format)))
+			) AS total_time_seconds,
+			(	SELECT
+					SUM(	TIME_TO_SEC( TIMEDIFF(to_date, from_date) ) )
+					FROM user_timesheet_components
+					WHERE component_type = 'break'
+					AND timesheet_id = ut.id
+					AND deleted = false
+					GROUP BY timesheet_id
+			) AS break_seconds,
+			IF(	max(utl.created_on) IS NOT NULL,
+					max(utl.created_on) +  INTERVAL 24 HOUR > NOW() AND ut.status='approved',
+					ut.updated_on +  INTERVAL 24 HOUR > NOW() AND ut.status='approved'
+			) AS enable_meditation,
+            u.zip AS user_zip,
+            u.state AS user_state,
+			u.role_id AS user_role_id,
+			s.shift_date AS shift_date_obj,
+            s.shift_starttime AS shift_start_time,
+			s.shift_endtime AS shift_end_time
+        FROM user_timesheets ut
+        LEFT JOIN users u ON u.id=ut.added_by
+        LEFT JOIN shift_applicants sa ON sa.shift_id=ut.shift_id AND sa.user_id = u.id
+        LEFT JOIN roles r ON sa.role_id=r.id
+        LEFT JOIN shifts s ON ut.shift_id=s.id
+        LEFT JOIN users sup ON sup.id=s.created_by
+        LEFT JOIN organizations o ON o.id=s.organization_id
+        LEFT JOIN organization_locations ol ON s.location_id=ol.id
+        LEFT JOIN organization_location_depts old ON s.department_id=old.id
+        LEFT JOIN timezones tz ON ol.timezone_id = tz.id
+        LEFT JOIN user_timesheet_log utl ON utl.user_id=ut.added_by
+			AND utl.shift_id=ut.shift_id
+			AND utl.user_timesheet_action_id = :LogApproved
+        LEFT JOIN user_timesheet_components uts ON uts.timesheet_id = ut.id
+			AND component_type = 'alteration'
+			LEFT JOIN shift_bonus_log AS sbl ON sbl.shift_id = ut.shift_id AND sbl.clinician_id = sa.user_id AND sbl.deleted = 0
+			LEFT JOIN bonuses AS b ON b.shift_id = ut.shift_id AND b.nurse_id = sa.user_id AND b.is_deleted = 0
+				AND b.unit = '` + constants.XRate + `' AND b.bonus_type_id = ` + constants.RateIncreaseBonusTypeIDStr + `
+		LEFT JOIN user_statcash_status_log ussl ON u.id=ussl.user_id
+			AND ussl.timestamp = (
+				SELECT
+					MAX(ussl2.timestamp)
+				FROM user_statcash_status_log ussl2
+				WHERE ussl2.user_id = u.id
+			)
+        LEFT JOIN user_statcash_status_types usst ON ussl.status_id = usst.id
+        WHERE ut.status IS NOT NULL ` + dateFilter + whereClauses + queryAConditions + `
+        GROUP by ut.id
